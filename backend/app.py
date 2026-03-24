@@ -1,30 +1,43 @@
+import os
 import json
 import faiss
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 from openai import OpenAI
 
-INDEX_FILE = "faiss.index"
-METADATA_FILE = "metadata.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INDEX_FILE = os.path.join(BASE_DIR, "faiss.index")
+METADATA_FILE = os.path.join(BASE_DIR, "metadata.json")
 
 app = FastAPI()
 client = OpenAI()
 
-print("Loading model...")
-model = SentenceTransformer("all-MiniLM-L6-v2")
-
-print("Loading FAISS index...")
-index = faiss.read_index(INDEX_FILE)
-
-print("Loading metadata...")
-with open(METADATA_FILE, "r", encoding="utf-8") as f:
-    metadata = json.load(f)
+model = None
+index = None
+metadata = None
 
 
 class QueryRequest(BaseModel):
     question: str
+
+
+@app.on_event("startup")
+def load_resources():
+    global model, index, metadata
+
+    print("Loading model...")
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    print("Loading FAISS index...")
+    index = faiss.read_index(INDEX_FILE)
+
+    print("Loading metadata...")
+    with open(METADATA_FILE, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    print("Startup complete.")
 
 
 @app.get("/")
@@ -34,60 +47,59 @@ def home():
 
 @app.post("/ask")
 def ask_question(request: QueryRequest):
-    question = request.question
+    global model, index, metadata
+
+    if model is None or index is None or metadata is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Model or index still loading. Try again in a moment.",
+        )
+
+    question = request.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
     query_embedding = model.encode([question])
     query_embedding = np.array(query_embedding).astype("float32")
 
-    k = 5
+    k = 3
     distances, indices = index.search(query_embedding, k)
 
     retrieved_chunks = []
-    for idx in indices[0]:
-        chunk = metadata[idx]
-        retrieved_chunks.append(chunk)
+    for i in indices[0]:
+        if 0 <= i < len(metadata):
+            chunk = metadata[i]
+            if isinstance(chunk, dict) and "text" in chunk:
+                retrieved_chunks.append(chunk["text"])
+            else:
+                retrieved_chunks.append(str(chunk))
 
-    source_counts = {}
-    for chunk in retrieved_chunks:
-        source = chunk["source"]
-        source_counts[source] = source_counts.get(source, 0) + 1
+    context = "\n\n".join(retrieved_chunks)
 
-    best_source = max(source_counts, key=source_counts.get)
-
-    filtered_chunks = [c for c in retrieved_chunks if c["source"] == best_source][:3]
-
-    results = []
-    context_texts = []
-
-    for chunk in filtered_chunks:
-        results.append(
-            {"source": chunk["source"], "page": chunk["page"], "text": chunk["text"]}
-        )
-        context_texts.append(
-            f"Source: {chunk['source']}, Page: {chunk['page']}\n{chunk['text']}"
-        )
-
-    context = "\n\n".join(context_texts)
-
-    try:
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=f"""
-You are a helpful university assistant.
-
-Answer the question clearly using only the context below.
-If the answer is not in the context, say you could not find it in the documents.
-Summarize the information in simple sentences.
-
-Question:
-{question}
+    prompt = f"""
+You are a helpful university assistant chatbot.
+Answer the question using only the context below.
+If the answer is not in the context, say: "I could not find that in the university data."
 
 Context:
 {context}
-""",
-        )
-        answer = response.output_text
-    except Exception as e:
-        answer = f"OpenAI API error: {str(e)}"
 
-    return {"question": question, "answer": answer, "sources": results}
+Question:
+{question}
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a helpful university assistant chatbot.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+
+    answer = response.choices[0].message.content
+
+    return {"question": question, "answer": answer, "context": retrieved_chunks}
