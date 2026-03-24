@@ -27,17 +27,22 @@ class QueryRequest(BaseModel):
 def load_resources():
     global model, index, metadata
 
-    print("Loading model...")
+    print("STEP 1: startup started")
+
+    print("STEP 2: loading model")
     model = SentenceTransformer("all-MiniLM-L6-v2")
+    print("STEP 3: model loaded")
 
-    print("Loading FAISS index...")
+    print("STEP 4: loading FAISS index")
     index = faiss.read_index(INDEX_FILE)
+    print("STEP 5: FAISS loaded")
 
-    print("Loading metadata...")
+    print("STEP 6: loading metadata")
     with open(METADATA_FILE, "r", encoding="utf-8") as f:
         metadata = json.load(f)
+    print("STEP 7: metadata loaded")
 
-    print("Startup complete.")
+    print("STEP 8: startup complete")
 
 
 @app.get("/")
